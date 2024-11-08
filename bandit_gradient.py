@@ -2,11 +2,18 @@ import numpy as np
 from tqdm import tqdm
 
 k = 10
-c = 2
+alpha = 0.1
 iteration = 100000
+Rt = 0
+Rt_ = 0
 
-Q = [0 for _ in range(k)]
+Ht = np.zeros(k)
 N = [0 for _ in range(k)]
+
+def softmax(x):
+    numerator = np.exp(x)
+    denominator = np.sum(numerator)
+    return numerator / denominator
 
 class Bandit:
     def __init__(self, k, min_mean=-1, max_mean=1, min_std=1, max_std=2):
@@ -25,16 +32,21 @@ class Bandit:
 bandit = Bandit(k)
 
 for i in tqdm(range(iteration)):
-    A = [q + c * np.sqrt(np.log(i+1) / (n+1)) for q, n in zip(Q, N)]
+    pi = softmax(Ht)
+    # index = np.argmax(pi)
+    index = np.random.choice(range(k), p=pi)
 
-    index = np.argmax(A)
-
-    R = bandit(index)
+    Rt = bandit(index)
+    Rt_ = (Rt + Rt_*i)/(i+1)
+    for j in range(k):
+        if j == index:
+            Ht[j] += alpha * (Rt - Rt_)*(1 - pi[j])
+        else:
+            Ht[j] -= alpha * (Rt - Rt_)*pi[j]
     N[index] += 1
-    Q[index] += (1/N[index]) * (R - Q[index])
 
-print("Q:")
-print(Q)
+print("Ht:")
+print(Ht)
 print("N:")
 print(N)
 bandit.print()
