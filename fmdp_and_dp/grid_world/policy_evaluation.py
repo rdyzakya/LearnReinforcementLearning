@@ -94,16 +94,11 @@ class Agent:
             }
         return state_action_values
     
-    def policy_prob(self, state : Tuple[int]): # π(a|s)
+    def policy(self, state : Tuple[int]): # π(a|s)
         action_values  = self.state_action_values[state]
         exp_action_values = {a : np.exp(v) for a, v in action_values.items()}
         action_prob = {a : e/sum(exp_action_values.values()) for a, e in exp_action_values.items()} # we want to use softmax
         return action_prob
-    
-    def policy(self, state : Tuple[int]): # π(s) deterministic
-        action_prob = self.policy_prob(state)
-        chosen_action = max(action_prob, key=action_prob.get)
-        return chosen_action
     
     def sweep(self, env : Environment, state_values : np.ndarray):
         states = env.get_all_states()
@@ -113,28 +108,36 @@ class Agent:
                 continue
 
             v = state_values[state[0], state[1]]
-            chosen_action = self.policy(state)
-            dynamics = env.dynamics(state, chosen_action)
+            action_prob = self.policy(state)
+            v_s = 0.0
 
-            q_pi = 0.0
-            for new_state, rewards in dynamics.items():
-                for reward, p in rewards.items():
-                    v_s_prime = state_values[new_state[0], new_state[1]]
-                    q_pi += p * (reward + self.discount_factor*v_s_prime) # q_π(s,a) = Σ p(s',r|s,a)[r + 𝛾V(s')]
-            v_s = 1.0 * q_pi # deterministic
+            for action, pi in action_prob.items():
+                dynamics = env.dynamics(state, action)
+                q_pi = 0.0
+                for new_state, rewards in dynamics.items():
+                    for reward, p in rewards.items():
+                        v_s_prime = state_values[new_state[0], new_state[1]]
+                        q_pi += p * (reward + self.discount_factor*v_s_prime) # q_π(s,a) = Σ p(s',r|s,a)[r + 𝛾V(s')]
+                v_s += pi * q_pi # V(s) = Σ π(a|s)q_π(s,a)
+
             delta = max(delta, abs(v - v_s))
             state_values[state[0], state[1]] = v_s
         return state_values, delta
     
-    def policy_evaluation(self, env : Environment, iterations : int=1000, epsilon : float=1e-5):
-        for _ in tqdm(range(iterations)):
-            new_state_values, delta = self.sweep(env, self.state_values.copy())
+    def policy_evaluation(self, 
+                          env : Environment, 
+                          state_values : np.ndarray, 
+                          iterations : int=1000, 
+                          epsilon : float=1e-5):
+        for _ in tqdm(range(iterations), desc="Policy Evaluation"):
+            new_state_values, delta = self.sweep(env, state_values.copy())
             if delta < epsilon:
                 break
-            self.state_values = new_state_values
+            state_values = new_state_values
+        return state_values
 
 if __name__ == "__main__":
-    N = 4
+    N = 5
     DISCOUNT_FACTOR = 0.5
     env = Environment(N)
     agent = Agent(env, DISCOUNT_FACTOR)
@@ -146,7 +149,7 @@ if __name__ == "__main__":
     print(agent.state_values)
 
     print("Policy evaluation...")
-    agent.policy_evaluation(env)
+    agent.state_values = agent.policy_evaluation(env, agent.state_values.copy())
 
     print("Result state values:")
     print(agent.state_values)

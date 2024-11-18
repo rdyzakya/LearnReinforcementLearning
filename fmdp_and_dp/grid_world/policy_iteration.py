@@ -95,16 +95,11 @@ class Agent:
             }
         return state_action_values
     
-    def policy_prob(self, state : Tuple[int]): # π(a|s)
+    def policy(self, state : Tuple[int]): # π(a|s)
         action_values  = self.state_action_values[state]
         exp_action_values = {a : np.exp(v) for a, v in action_values.items()}
         action_prob = {a : e/sum(exp_action_values.values()) for a, e in exp_action_values.items()} # we want to use softmax
         return action_prob
-    
-    def policy(self, state : Tuple[int]): # π(s) deterministic
-        action_prob = self.policy_prob(state)
-        chosen_action = max(action_prob, key=action_prob.get)
-        return chosen_action
     
     def sweep(self, env : Environment, state_values : np.ndarray):
         states = env.get_all_states()
@@ -114,38 +109,21 @@ class Agent:
                 continue
 
             v = state_values[state[0], state[1]]
-            chosen_action = self.policy(state)
-            dynamics = env.dynamics(state, chosen_action)
+            action_prob = self.policy(state)
+            v_s = 0.0
 
-            q_pi = 0.0
-            for new_state, rewards in dynamics.items():
-                for reward, p in rewards.items():
-                    v_s_prime = state_values[new_state[0], new_state[1]]
-                    q_pi += p * (reward + self.discount_factor*v_s_prime) # q_π(s,a) = Σ p(s',r|s,a)[r + 𝛾V(s')]
-            v_s = 1.0 * q_pi # deterministic
+            for action, pi in action_prob.items():
+                dynamics = env.dynamics(state, action)
+                q_pi = 0.0
+                for new_state, rewards in dynamics.items():
+                    for reward, p in rewards.items():
+                        v_s_prime = state_values[new_state[0], new_state[1]]
+                        q_pi += p * (reward + self.discount_factor*v_s_prime) # q_π(s,a) = Σ p(s',r|s,a)[r + 𝛾V(s')]
+                v_s += pi * q_pi # V(s) = Σ π(a|s)q_π(s,a)
+
             delta = max(delta, abs(v - v_s))
             state_values[state[0], state[1]] = v_s
         return state_values, delta
-    
-    def policy_improvement(self, env : Environment, state_action_values : Dict):
-        states = env.get_all_states()
-        for state in states:
-            if env.is_terminal(state):
-                continue
-            old_action = self.policy(state)
-
-            for a, _ in self.policy_prob(state).items():
-                pass
-
-            # for a, _ in self.policy(state).items():
-            #     q_pi = 0.0
-            #     dynamics = env.dynamics(state, a)
-            #     for new_state, rewards in dynamics.items():
-            #         for reward, p in rewards.items():
-            #             v_s_prime = self.state_values[new_state[0], new_state[1]]
-            #             q_pi += p * (reward + self.discount_factor*v_s_prime)
-            #     state_action_values[state][a] = q_pi
-        return state_action_values
     
     def policy_evaluation(self, 
                           env : Environment, 
@@ -159,36 +137,75 @@ class Agent:
             state_values = new_state_values
         return state_values
     
-    def generalized_policy_iteration(self, 
-                                     env : Environment, 
-                                     iterations : int=1000, 
-                                     state_values_epsilon : float=1e-5,
-                                     state_action_values_epsilon : float=1e-5,
-                                     evaluation_iterations : int=1000,
-                                     evaluation_epsilon : float=1e-5):
+    def policy_improvement(self, env : Environment, state_action_values : Dict):
+        states = env.get_all_states()
+        policy_stable = True
+        for state in states:
+            if env.is_terminal(state):
+                continue
+
+            available_actions = []
+            old_action_values = []
+
+            for a, v in state_action_values[state].items():
+                available_actions.append(a)
+                old_action_values.append(v)
+            
+            max_old_action_values = max(old_action_values)
+
+            old_actions = set()
+
+            for i in range(len(available_actions)):
+                if old_action_values[i] == max_old_action_values:
+                    old_actions.add(available_actions[i])
+            
+            new_action_values = []
+
+            for a in available_actions:
+                dynamics = env.dynamics(state, a)
+                q_pi = 0.0
+                for new_state, rewards in dynamics.items():
+                    for reward, p in rewards.items():
+                        v_s_prime = self.state_values[new_state[0], new_state[1]]
+                        q_pi += p * (reward + self.discount_factor*v_s_prime) # q_π(s,a) = Σ p(s',r|s,a)[r + 𝛾V(s')]
+                new_action_values.append(q_pi)
+            
+            max_new_action_values = max(new_action_values)
+
+            new_actions = set()
+
+            for i in range(len(available_actions)):
+                if new_action_values[i] == max_new_action_values:
+                    new_actions.add(available_actions[i])
+                
+                state_action_values[state][available_actions[i]] = new_action_values[i] # update state action values
+            
+            if len(old_actions.difference(new_actions)) != 0: # we can use something like delta in policy evaluation if we want
+                policy_stable = False
+
+        return state_action_values, policy_stable
+    
+    
+    def policy_iteration(self, 
+                        env : Environment, 
+                        iterations : int=1000, 
+                        evaluation_iterations : int=1000,
+                        evaluation_epsilon : float=1e-5):
         for _ in tqdm(range(iterations), desc="GPI"):
-            new_state_values = self.policy_evaluation(env, self.state_values.copy(), evaluation_iterations, evaluation_epsilon)
-            new_state_action_values = self.policy_improvement(env, deepcopy(self.state_action_values))
+            new_state_values = self.policy_evaluation(env, 
+                                                      self.state_values.copy(),
+                                                      evaluation_iterations,
+                                                      evaluation_epsilon)
+            self.state_values = new_state_values
 
-            l2_state_values = ((new_state_values - self.state_values)**2).mean()
-            l2_state_action_values = 0.0
-
-            n = 0
-
-            for s, av in self.state_action_values.items():
-                for a, v in av.items():
-                    l2_state_action_values += (new_state_action_values[s][a] - v)**2
-                    n += 1
-            l2_state_action_values = np.sqrt(l2_state_action_values/n)
-
-            if l2_state_values <= state_values_epsilon and l2_state_action_values <= state_action_values_epsilon:
+            self.state_action_values, policy_stable = self.policy_improvement(env,
+                                                                             deepcopy(self.state_action_values))
+            if policy_stable:
                 break
 
-            self.state_values = new_state_values
-            self.state_action_values = new_state_action_values
 
 if __name__ == "__main__":
-    N = 3
+    N = 5
     DISCOUNT_FACTOR = 0.5
     env = Environment(N)
     agent = Agent(env, DISCOUNT_FACTOR)
@@ -203,7 +220,7 @@ if __name__ == "__main__":
     print(agent.state_action_values)
 
     print("GPI...")
-    agent.generalized_policy_iteration(env)
+    agent.policy_iteration(env)
 
     print("Result state values:")
     print(agent.state_values)
